@@ -162,6 +162,7 @@ export default class AssetInput extends Component<Props> {
             minimumFractionDigits: decimals,
           }}
           onChange={(value) => {
+            console.log('asset input', value);
             assetField.onChange(value);
           }}
           currency={ticker}

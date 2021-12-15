@@ -86,6 +86,8 @@ type State = {
   isResetButtonDisabled: boolean,
   isReceiverAddressValid: boolean,
   isTransactionFeeCalculated: boolean,
+  isCalculatingTransactionFee: boolean,
+  hasUpdatedMinimumAdaValue: boolean,
 };
 
 @observer
@@ -105,14 +107,9 @@ export default class WalletSendForm extends Component<Props, State> {
     isResetButtonDisabled: true,
     isReceiverAddressValid: false,
     isTransactionFeeCalculated: false,
+    isCalculatingTransactionFee: false,
+    hasUpdatedMinimumAdaValue: false,
   };
-
-  // We need to track the fee calculation state in order to disable
-  // the "Submit" button as soon as either receiver or amount field changes.
-  // This is required as we are using debounced validation and we need to
-  // disable the "Submit" button as soon as the value changes and then wait for
-  // the validation to end in order to see if the button should be enabled or not.
-  _isCalculatingTransactionFee = false;
 
   // We need to track the mounted state in order to avoid calling
   // setState promise handling code after the component was already unmounted:
@@ -310,7 +307,7 @@ export default class WalletSendForm extends Component<Props, State> {
   };
 
   isDisabled = () =>
-    this._isCalculatingTransactionFee ||
+    this.state.isCalculatingTransactionFee ||
     !this.state.isTransactionFeeCalculated ||
     !this.form.isValid;
 
@@ -417,17 +414,11 @@ export default class WalletSendForm extends Component<Props, State> {
     prevFeeCalculationRequestQue: number
   ) => currentFeeCalculationRequestQue - prevFeeCalculationRequestQue === 1;
 
-  calculateTransactionFee = async () => {
+  calculateTransactionFee = async (
+    shouldUpdateMinimumAdaAmount: boolean = false
+  ) => {
     const { form } = this;
     const emptyAssetFieldValue = '0';
-    const hasEmptyAssetFields = this.selectedAssetsAmounts.includes(
-      emptyAssetFieldValue
-    );
-    if (!form.isValid || hasEmptyAssetFields) {
-      form.showErrors(true);
-      return;
-    }
-
     const receiverField = form.$('receiver');
     const receiver = receiverField.value;
     const adaAmountField = form.$('adaAmount');
@@ -453,9 +444,9 @@ export default class WalletSendForm extends Component<Props, State> {
       isTransactionFeeCalculated: false,
       transactionFee: new BigNumber(0),
       transactionFeeError: null,
+      isCalculatingTransactionFee: true,
     }));
     try {
-      this._isCalculatingTransactionFee = true;
       const { fee, minimumAda } = await this.props.calculateTransactionFee(
         receiver,
         adaAmount,
@@ -469,13 +460,21 @@ export default class WalletSendForm extends Component<Props, State> {
         ) &&
         !this.selectedAssetsAmounts.includes(emptyAssetFieldValue)
       ) {
-        this._isCalculatingTransactionFee = false;
-        this.setState({
+        const minimumAdaValue = minimumAda || new BigNumber(0);
+        const nextState = {
           isTransactionFeeCalculated: true,
-          minimumAda: minimumAda || new BigNumber(0),
+          minimumAda: minimumAdaValue,
           transactionFee: fee,
           transactionFeeError: null,
-        });
+          isCalculatingTransactionFee: false,
+          hasUpdatedMinimumAdaValue: this.state.hasUpdatedMinimumAdaValue,
+        };
+        if (minimumAdaValue.gte(adaAmount) && shouldUpdateMinimumAdaAmount) {
+          nextState.hasUpdatedMinimumAdaValue = await this.trySetMinimumAdaAmount(
+            minimumAdaValue.toFormat()
+          );
+        }
+        this.setState(nextState);
       }
     } catch (error) {
       if (
@@ -489,6 +488,11 @@ export default class WalletSendForm extends Component<Props, State> {
         let transactionFeeError;
         let localizableError = error;
         let values;
+        let nextState = {
+          isCalculatingTransactionFee: false,
+          isTransactionFeeCalculated: false,
+          transactionFee: new BigNumber(0),
+        };
 
         if (error.id === 'api.errors.utxoTooSmall') {
           const minimumAda = get(error, 'values.minimumAda');
@@ -497,7 +501,22 @@ export default class WalletSendForm extends Component<Props, State> {
               ? messages.minAdaRequiredWithAssetTooltip
               : messages.minAdaRequiredWithNoAssetTooltip;
             values = { minimumAda };
-            this.setState({ minimumAda: new BigNumber(minimumAda) });
+            if (shouldUpdateMinimumAdaAmount) {
+              const hasUpdatedMinimumAdaValue = await this.trySetMinimumAdaAmount(
+                minimumAda
+              );
+              if (hasUpdatedMinimumAdaValue) {
+                return this.setState({
+                  ...nextState,
+                  hasUpdatedMinimumAdaValue: true,
+                  minimumAda: new BigNumber(minimumAda),
+                });
+              }
+            }
+            nextState = {
+              ...nextState,
+              minimumAda: new BigNumber(minimumAda),
+            };
           }
         }
 
@@ -514,23 +533,48 @@ export default class WalletSendForm extends Component<Props, State> {
           );
         }
 
-        this._isCalculatingTransactionFee = false;
         this.setState({
-          isTransactionFeeCalculated: false,
-          transactionFee: new BigNumber(0),
+          ...nextState,
           transactionFeeError,
         });
       }
     }
   };
 
+  trySetMinimumAdaAmount = async (minimumAda: string) => {
+    const isValid = await this.props.validateAmount(
+      formattedAmountToNaturalUnits(minimumAda)
+    );
+
+    if (!isValid) {
+      return false;
+    }
+
+    this.form.$('adaAmount').onChange(minimumAda);
+    return true;
+  };
+
+  updateAdaAmount = async () => {
+    try {
+      this.trySetMinimumAdaAmount(this.state.minimumAda.toFormat());
+    } catch (err) {
+      return false;
+    }
+  };
+
+  isAdaAmountLessThanMinimumRequired = () => {
+    const adaAmountField = this.form.$('adaAmount');
+    const adaAmount = new BigNumber(adaAmountField.value || 0);
+    return adaAmount.lt(this.state.minimumAda);
+  };
+
   resetTransactionFee() {
     if (this._isMounted) {
-      this._isCalculatingTransactionFee = false;
       this.setState({
         isTransactionFeeCalculated: false,
         transactionFee: new BigNumber(0),
         transactionFeeError: null,
+        isCalculatingTransactionFee: false,
       });
     }
   }
@@ -625,7 +669,7 @@ export default class WalletSendForm extends Component<Props, State> {
           assetValue.isLessThanOrEqualTo(asset.quantity);
         const isValid = isValidAmount && isValidRange;
         if (isValid) {
-          this.calculateTransactionFee();
+          this.calculateTransactionFee(true);
         } else {
           this.resetTransactionFee();
         }
@@ -671,11 +715,17 @@ export default class WalletSendForm extends Component<Props, State> {
     this.resetTransactionFee();
   };
 
+  getMinimumAdaValue = () => {
+    const { minimumAda } = this.state;
+    return minimumAda.isZero()
+      ? TRANSACTION_MIN_ADA_VALUE
+      : minimumAda.toFormat();
+  };
+
   renderReceiverRow = (): Node => {
     const { intl } = this.context;
     const {
       formFields,
-      minimumAda,
       transactionFeeError,
       selectedAssetUniqueIds,
       isReceiverAddressValid,
@@ -695,9 +745,7 @@ export default class WalletSendForm extends Component<Props, State> {
         40 * selectedAssetUniqueIds.length
       : assetsSeparatorBasicHeight;
 
-    const minimumAdaValue = minimumAda.isZero()
-      ? TRANSACTION_MIN_ADA_VALUE
-      : minimumAda.toFormat();
+    const minimumAdaValue = this.getMinimumAdaValue();
 
     const addAssetButtonClasses = classNames([
       styles.addAssetButton,
@@ -809,11 +857,32 @@ export default class WalletSendForm extends Component<Props, State> {
                   autoFocus={this._isAutoFocusEnabled}
                 />
                 <div className={styles.minAdaRequired}>
-                  <span>
-                    {intl.formatMessage(messages.minAdaRequired, {
-                      minimumAda: minimumAdaValue,
-                    })}
-                  </span>
+                  {this.isAdaAmountLessThanMinimumRequired() ? (
+                    <>
+                      <Button
+                        className={addAssetButtonClasses}
+                        label={intl.formatMessage(
+                          messages.updateAdaAmountButton
+                        )}
+                        onClick={this.updateAdaAmount}
+                      />{' '}
+                      <span>
+                        {intl.formatMessage(
+                          messages.updateAdaAmountDescription,
+                          {
+                            minimumAda: minimumAdaValue,
+                          }
+                        )}
+                      </span>
+                    </>
+                  ) : (
+                    <span>
+                      {intl.formatMessage(messages.minAdaRequired, {
+                        minimumAda: minimumAdaValue,
+                      })}
+                    </span>
+                  )}
+
                   <PopOver
                     content={intl.formatMessage(minAdaRequiredTooltip, {
                       minimumAda: minimumAdaValue,
@@ -909,6 +978,8 @@ export default class WalletSendForm extends Component<Props, State> {
       styles.spinning,
     ]);
 
+    const minimumAdaValue = this.getMinimumAdaValue();
+
     return (
       <div className={styles.component}>
         {isRestoreActive ? (
@@ -936,7 +1007,7 @@ export default class WalletSendForm extends Component<Props, State> {
                   }
                   isSet
                 />
-                {this._isCalculatingTransactionFee && (
+                {this.state.isCalculatingTransactionFee && (
                   <div className={styles.calculatingFeesContainer}>
                     <PopOver
                       content={intl.formatMessage(
@@ -948,6 +1019,16 @@ export default class WalletSendForm extends Component<Props, State> {
                   </div>
                 )}
               </div>
+              {this.state.hasUpdatedMinimumAdaValue && (
+                <div className={styles.minimumAmountNotice}>
+                  <FormattedHTMLMessage
+                    {...messages.minimumAmountNotice}
+                    values={{
+                      minimumAda: minimumAdaValue,
+                    }}
+                  />
+                </div>
+              )}
               <div className={styles.buttonsContainer}>
                 <Button
                   className="flat"
