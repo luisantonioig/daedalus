@@ -248,6 +248,6 @@ The result will can be found at `.\daedalus-*.exe`.
 This will use nix to build a Linux installer. Using the [IOHK binary
 cache][cache] will speed things up.
 
-    nix build -f ./release.nix mainnet.installer
+    nix build -f ./release.nix mainnet.daedalus
 
 The result can be found at `./result/daedalus-*.bin`.
